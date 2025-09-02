@@ -11,6 +11,7 @@ import random
 import math
 import pandas as pd
 import numpy as np
+import time
 
 # Define labels for dataframes
 def generate_dataframe_labels():
@@ -23,7 +24,7 @@ def generate_dataframe_labels():
     # labels for mpnn designs
     core_labels = ['pLDDT', 'pTM', 'i_pTM', 'pAE', 'i_pAE', 'i_pLDDT', 'ss_pLDDT', 'Unrelaxed_Clashes', 'Relaxed_Clashes', 'Binder_Energy_Score', 'Surface_Hydrophobicity',
                     'ShapeComplementarity', 'PackStat', 'dG', 'dSASA', 'dG/dSASA', 'Interface_SASA_%', 'Interface_Hydrophobicity', 'n_InterfaceResidues', 'n_InterfaceHbonds', 'InterfaceHbondsPercentage',
-                    'n_InterfaceUnsatHbonds', 'InterfaceUnsatHbondsPercentage', 'Interface_Helix%', 'Interface_BetaSheet%', 'Interface_Loop%', 'Binder_Helix%', 
+                    'n_InterfaceUnsatHbonds', 'InterfaceUnsatHbondsPercentage', 'Interface_Helix%', 'Interface_BetaSheet%', 'Interface_Loop%', 'Binder_Helix%',
                     'Binder_BetaSheet%', 'Binder_Loop%', 'InterfaceAAs', 'Hotspot_RMSD', 'Target_RMSD', 'Binder_pLDDT', 'Binder_pTM', 'Binder_pAE', 'Binder_RMSD']
 
     design_labels = ['Design', 'Protocol', 'Length', 'Seed', 'Helicity', 'Target_Hotspot', 'Sequence', 'InterfaceResidues', 'MPNN_score', 'MPNN_seq_recovery']
@@ -57,7 +58,7 @@ def generate_filter_pass_csv(failure_csv, filter_json):
     if not os.path.exists(failure_csv):
         with open(filter_json, 'r') as file:
             data = json.load(file)
-        
+
         # Create a list of modified keys
         names = ['Trajectory_logits_pLDDT', 'Trajectory_softmax_pLDDT', 'Trajectory_one-hot_pLDDT', 'Trajectory_final_pLDDT', 'Trajectory_Contacts', 'Trajectory_Clashes', 'Trajectory_WrongHotspot']
         special_prefixes = ('Average_', '1_', '2_', '3_', '4_', '5_')
@@ -95,15 +96,27 @@ def generate_filter_pass_csv(failure_csv, filter_json):
 
 # update failure rates from trajectories and early predictions
 def update_failures(failure_csv, failure_column_or_dict):
-    failure_df = pd.read_csv(failure_csv)
-    
+
+   # failure_df = pd.read_csv(failure_csv)
+   for attempt in range(1, 11):
+    try:
+        failure_df = pd.read_csv(failure_csv)
+        print(f"Read failure CSV on attempt {attempt}")
+        break
+    except pd.errors.EmptyDataError:
+        if attempt < 10:
+            print(f"Failed to read failure CSV on attempt {attempt}, retrying...")
+            time.sleep(60)
+        else:
+            raise
+
     def strip_model_prefix(name):
         # Strips the model-specific prefix if it exists
         parts = name.split('_')
         if parts[0].isdigit():
             return '_'.join(parts[1:])
         return name
-    
+
     # update dictionary coming from complex prediction
     if isinstance(failure_column_or_dict, dict):
         # Update using a dictionary of failures
@@ -120,7 +133,7 @@ def update_failures(failure_csv, failure_column_or_dict):
             failure_df[failure_column] += 1
         else:
             failure_df[failure_column] = 1
-    
+
     failure_df.to_csv(failure_csv, index=False)
 
 # Check if number of trajectories generated
@@ -147,7 +160,7 @@ def check_accepted_designs(design_paths, mpnn_csv, final_labels, final_csv, adva
         # load dataframe of designed binders
         design_df = pd.read_csv(mpnn_csv)
         design_df = design_df.sort_values('Average_i_pTM', ascending=False)
-        
+
         # create final csv dataframe to copy matched rows, initialize with the column labels
         final_df = pd.DataFrame(columns=final_labels)
 
