@@ -3,15 +3,61 @@
 ####################################
 ### Import dependencies
 import os
+import fcntl
 import json
 import jax
 import shutil
+import tempfile
 import zipfile
 import random
 import math
 import pandas as pd
 import numpy as np
-import time
+from collections.abc import Iterable
+from contextlib import contextmanager
+
+@contextmanager
+def locked_csv(csv_file):
+    lock_file = csv_file + ".lock"
+    os.makedirs(os.path.dirname(os.path.abspath(lock_file)), exist_ok=True)
+
+    with open(lock_file, 'w') as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_handle, fcntl.LOCK_UN)
+
+def _write_dataframe_atomic(csv_file, dataframe):
+    csv_dir = os.path.dirname(os.path.abspath(csv_file))
+    csv_name = os.path.basename(csv_file)
+    temp_file = None
+
+    try:
+        with tempfile.NamedTemporaryFile('w', dir=csv_dir, prefix=f".{csv_name}.", suffix=".tmp", delete=False) as handle:
+            temp_file = handle.name
+            dataframe.to_csv(handle, index=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_file, csv_file)
+    finally:
+        if temp_file and os.path.exists(temp_file):
+            os.remove(temp_file)
+
+def read_dataframe(csv_file, **kwargs):
+    with locked_csv(csv_file):
+        return pd.read_csv(csv_file, **kwargs)
+
+def _strip_failure_prefix(name):
+    name = str(name)
+    if name.startswith('Average_'):
+        return name.split('_', 1)[1]
+
+    parts = name.split('_', 1)
+    if len(parts) == 2 and parts[0].isdigit():
+        return parts[1]
+
+    return name
 
 # Define labels for dataframes
 def generate_dataframe_labels():
@@ -55,24 +101,19 @@ def generate_directories(design_path):
 
 # generate CSV file for tracking designs not passing filters
 def generate_filter_pass_csv(failure_csv, filter_json):
-    if not os.path.exists(failure_csv):
+    with locked_csv(failure_csv):
+        if os.path.exists(failure_csv):
+            return
+
         with open(filter_json, 'r') as file:
             data = json.load(file)
 
         # Create a list of modified keys
         names = ['Trajectory_logits_pLDDT', 'Trajectory_softmax_pLDDT', 'Trajectory_one-hot_pLDDT', 'Trajectory_final_pLDDT', 'Trajectory_Contacts', 'Trajectory_Clashes', 'Trajectory_WrongHotspot']
-        special_prefixes = ('Average_', '1_', '2_', '3_', '4_', '5_')
         tracked_filters = set()
 
         for key in data.keys():
-            processed_name = key  # Use the full key by default
-
-            # Check if the key starts with any special prefixes
-            for prefix in special_prefixes:
-                if key.startswith(prefix):
-                    # Strip the prefix and use the remaining part
-                    processed_name = key.split('_', 1)[1]
-                    break
+            processed_name = _strip_failure_prefix(key)
 
             # Handle 'InterfaceAAs' with appending amino acids
             if 'InterfaceAAs' in processed_name:
@@ -92,52 +133,42 @@ def generate_filter_pass_csv(failure_csv, filter_json):
         df = pd.DataFrame(columns=names)
         df.loc[0] = [0] * len(names)
 
-        df.to_csv(failure_csv, index=False)
+        _write_dataframe_atomic(failure_csv, df)
 
 # update failure rates from trajectories and early predictions
 def update_failures(failure_csv, failure_column_or_dict):
+    with locked_csv(failure_csv):
+        try:
+            failure_df = pd.read_csv(failure_csv)
+        except pd.errors.EmptyDataError as exc:
+            raise RuntimeError(f"Failure CSV is empty: {failure_csv}") from exc
 
-   # failure_df = pd.read_csv(failure_csv)
-   for attempt in range(1, 11):
-    try:
-        failure_df = pd.read_csv(failure_csv)
-        print(f"Read failure CSV on attempt {attempt}")
-        break
-    except pd.errors.EmptyDataError:
-        if attempt < 10:
-            print(f"Failed to read failure CSV on attempt {attempt}, retrying...")
-            time.sleep(60)
+        if failure_df.empty:
+            raise RuntimeError(f"Failure CSV has no counts row: {failure_csv}")
+
+        # update dictionary coming from complex prediction
+        if isinstance(failure_column_or_dict, dict):
+            failure_counts = {}
+            for filter_name, count in failure_column_or_dict.items():
+                failure_column = _strip_failure_prefix(filter_name)
+                failure_counts[failure_column] = failure_counts.get(failure_column, 0) + count
+        elif isinstance(failure_column_or_dict, str):
+            failure_counts = {_strip_failure_prefix(failure_column_or_dict): 1}
+        elif isinstance(failure_column_or_dict, Iterable):
+            failure_counts = {}
+            for filter_name in failure_column_or_dict:
+                failure_column = _strip_failure_prefix(filter_name)
+                failure_counts[failure_column] = 1
         else:
-            raise
+            failure_counts = {_strip_failure_prefix(failure_column_or_dict): 1}
 
-    if failure_df is None:
-        raise RuntimeError("Failed to read CSV after 10 attempts")
-
-    def strip_model_prefix(name):
-        # Strips the model-specific prefix if it exists
-        parts = name.split('_')
-        if parts[0].isdigit():
-            return '_'.join(parts[1:])
-        return name
-
-    # update dictionary coming from complex prediction
-    if isinstance(failure_column_or_dict, dict):
-        # Update using a dictionary of failures
-        for filter_name, count in failure_column_or_dict.items():
-            stripped_name = strip_model_prefix(filter_name)
-            if stripped_name in failure_df.columns:
-                failure_df[stripped_name] += count
+        for failure_column, count in failure_counts.items():
+            if failure_column in failure_df.columns:
+                failure_df[failure_column] += count
             else:
-                failure_df[stripped_name] = count
-    else:
-        # Update a single column from trajectory generation
-        failure_column = strip_model_prefix(failure_column_or_dict)
-        if failure_column in failure_df.columns:
-            failure_df[failure_column] += 1
-        else:
-            failure_df[failure_column] = 1
+                failure_df[failure_column] = count
 
-    failure_df.to_csv(failure_csv, index=False)
+        _write_dataframe_atomic(failure_csv, failure_df)
 
 # Check if number of trajectories generated
 def check_n_trajectories(design_paths, advanced_settings):
@@ -161,7 +192,7 @@ def check_accepted_designs(design_paths, mpnn_csv, final_labels, final_csv, adva
             os.remove(os.path.join(design_paths["Accepted/Ranked"], f))
 
         # load dataframe of designed binders
-        design_df = pd.read_csv(mpnn_csv)
+        design_df = read_dataframe(mpnn_csv)
         design_df = design_df.sort_values('Average_i_pTM', ascending=False)
 
         # create final csv dataframe to copy matched rows, initialize with the column labels
@@ -184,7 +215,8 @@ def check_accepted_designs(design_paths, mpnn_csv, final_labels, final_csv, adva
                     break
 
         # save the final_df to final_csv
-        final_df.to_csv(final_csv, index=False)
+        with locked_csv(final_csv):
+            _write_dataframe_atomic(final_csv, final_df)
 
         # zip large folders to save space
         if advanced_settings["zip_animations"]:
@@ -299,14 +331,19 @@ def load_af2_models(af_multimer_setting):
 
 # create csv for insertion of data
 def create_dataframe(csv_file, columns):
-    if not os.path.exists(csv_file):
-        df = pd.DataFrame(columns=columns)
-        df.to_csv(csv_file, index=False)
+    with locked_csv(csv_file):
+        if not os.path.exists(csv_file):
+            df = pd.DataFrame(columns=columns)
+            _write_dataframe_atomic(csv_file, df)
 
 # insert row of statistics into csv
 def insert_data(csv_file, data_array):
     df = pd.DataFrame([data_array])
-    df.to_csv(csv_file, mode='a', header=False, index=False)
+    with locked_csv(csv_file):
+        with open(csv_file, 'a') as handle:
+            df.to_csv(handle, header=False, index=False)
+            handle.flush()
+            os.fsync(handle.fileno())
 
 # save generated sequence
 def save_fasta(design_name, sequence, design_paths):
