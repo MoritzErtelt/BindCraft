@@ -14,10 +14,10 @@ from pyrosetta.rosetta.core.select import get_residues_from_subset
 from pyrosetta.rosetta.core.io import pose_from_pose
 from pyrosetta.rosetta.protocols.rosetta_scripts import XmlObjects
 from .generic_utils import clean_pdb
-from .biopython_utils import hotspot_residues
+from .biopython_utils import hotspot_residues, target_hotspot_contacts
 
 # Rosetta interface scores
-def score_interface(pdb_file, binder_chain="B"):
+def score_interface(pdb_file, binder_chain="B", target_hotspot_residues=None, hotspot_contact_cutoff=4.0, hotspot_contact_required_fraction=0.5):
     # load pose
     pose = pr.pose_from_pdb(pdb_file)
 
@@ -40,6 +40,14 @@ def score_interface(pdb_file, binder_chain="B"):
     # Initialize list to store PDB residue IDs at the interface
     interface_residues_set = hotspot_residues(pdb_file, binder_chain)
     interface_residues_pdb_ids = []
+    target_hotspot_metrics = target_hotspot_contacts(
+        pdb_file,
+        target_hotspot_residues,
+        binder_chain=binder_chain,
+        target_chain="A",
+        atom_distance_cutoff=hotspot_contact_cutoff,
+        required_fraction=hotspot_contact_required_fraction,
+    )
     
     # Iterate over the interface residues
     for pdb_res_num, aa_type in interface_residues_set.items():
@@ -132,6 +140,10 @@ def score_interface(pdb_file, binder_chain="B"):
     'interface_fraction': interface_binder_fraction,
     'interface_hydrophobicity': interface_hydrophobicity,
     'interface_nres': interface_nres,
+    'target_hotspot_contacts': target_hotspot_metrics['target_hotspot_contacts'],
+    'target_hotspot_contact_count': target_hotspot_metrics['target_hotspot_contact_count'],
+    'target_hotspot_contact_fraction': target_hotspot_metrics['target_hotspot_contact_fraction'],
+    'target_hotspot_contact_pass': target_hotspot_metrics['target_hotspot_contact_pass'],
     'interface_interface_hbonds': interface_interface_hbonds,
     'interface_hbond_percentage': interface_hbond_percentage,
     'interface_delta_unsat_hbonds': interface_delta_unsat_hbonds,

@@ -62,7 +62,8 @@ def _strip_failure_prefix(name):
 # Define labels for dataframes
 def generate_dataframe_labels():
     # labels for trajectory
-    trajectory_labels = ['Design', 'Protocol', 'Length', 'Seed', 'Helicity', 'Target_Hotspot', 'Sequence', 'InterfaceResidues', 'pLDDT', 'pTM', 'i_pTM', 'pAE', 'i_pAE', 'i_pLDDT', 'ss_pLDDT', 'Unrelaxed_Clashes',
+    trajectory_labels = ['Design', 'Protocol', 'Length', 'Seed', 'Helicity', 'Target_Hotspot', 'Sequence', 'InterfaceResidues', 'Target_HotspotContacts', 'Target_HotspotContactCount', 'Target_HotspotContactFraction',
+                        'Target_HotspotContactPass', 'pLDDT', 'pTM', 'i_pTM', 'pAE', 'i_pAE', 'i_pLDDT', 'ss_pLDDT', 'Unrelaxed_Clashes',
                         'Relaxed_Clashes', 'Binder_Energy_Score', 'Surface_Hydrophobicity', 'ShapeComplementarity', 'PackStat', 'dG', 'dSASA', 'dG/dSASA', 'Interface_SASA_%', 'Interface_Hydrophobicity', 'n_InterfaceResidues',
                         'n_InterfaceHbonds', 'InterfaceHbondsPercentage', 'n_InterfaceUnsatHbonds', 'InterfaceUnsatHbondsPercentage', 'Interface_Helix%', 'Interface_BetaSheet%', 'Interface_Loop%',
                         'Binder_Helix%', 'Binder_BetaSheet%', 'Binder_Loop%', 'InterfaceAAs', 'Target_RMSD', 'TrajectoryTime', 'Notes', 'TargetSettings', 'Filters', 'AdvancedSettings']
@@ -71,7 +72,8 @@ def generate_dataframe_labels():
     core_labels = ['pLDDT', 'pTM', 'i_pTM', 'pAE', 'i_pAE', 'i_pLDDT', 'ss_pLDDT', 'Unrelaxed_Clashes', 'Relaxed_Clashes', 'Binder_Energy_Score', 'Surface_Hydrophobicity',
                     'ShapeComplementarity', 'PackStat', 'dG', 'dSASA', 'dG/dSASA', 'Interface_SASA_%', 'Interface_Hydrophobicity', 'n_InterfaceResidues', 'n_InterfaceHbonds', 'InterfaceHbondsPercentage',
                     'n_InterfaceUnsatHbonds', 'InterfaceUnsatHbondsPercentage', 'Interface_Helix%', 'Interface_BetaSheet%', 'Interface_Loop%', 'Binder_Helix%',
-                    'Binder_BetaSheet%', 'Binder_Loop%', 'InterfaceAAs', 'Hotspot_RMSD', 'Target_RMSD', 'Binder_pLDDT', 'Binder_pTM', 'Binder_pAE', 'Binder_RMSD']
+                    'Binder_BetaSheet%', 'Binder_Loop%', 'InterfaceAAs', 'Target_HotspotContactCount', 'Target_HotspotContactFraction', 'Target_HotspotContactPass',
+                    'Hotspot_RMSD', 'Target_RMSD', 'Binder_pLDDT', 'Binder_pTM', 'Binder_pAE', 'Binder_RMSD']
 
     design_labels = ['Design', 'Protocol', 'Length', 'Seed', 'Helicity', 'Target_Hotspot', 'Sequence', 'InterfaceResidues', 'MPNN_score', 'MPNN_seq_recovery']
 
@@ -180,6 +182,55 @@ def check_n_trajectories(design_paths, advanced_settings):
     else:
         return False
 
+def _coerce_bool(value):
+    if pd.isna(value):
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ["true", "1"]:
+            return True
+        if lowered in ["false", "0"]:
+            return False
+    return None
+
+def check_hotspot_trajectory_failures(trajectory_csv, advanced_settings):
+    if not advanced_settings.get("enforce_hotspot_contacts", True):
+        return False
+    if not os.path.exists(trajectory_csv):
+        return False
+
+    try:
+        trajectory_df = read_dataframe(trajectory_csv)
+    except pd.errors.EmptyDataError:
+        return False
+
+    pass_column = 'Target_HotspotContactPass'
+    if pass_column not in trajectory_df.columns:
+        return False
+
+    hotspot_passes = trajectory_df[pass_column].map(_coerce_bool).dropna()
+    total_hotspot_trajectories = len(hotspot_passes)
+    minimum_trajectories = advanced_settings.get("hotspot_contact_min_trajectories", 10)
+    if total_hotspot_trajectories < minimum_trajectories:
+        return False
+
+    failed_trajectories = int((hotspot_passes == False).sum())
+    failure_fraction = failed_trajectories / total_hotspot_trajectories
+    maximum_failure_fraction = advanced_settings.get("hotspot_contact_max_failure_fraction", 0.25)
+
+    if failure_fraction >= maximum_failure_fraction:
+        required_fraction = advanced_settings.get("hotspot_contact_required_fraction", 0.5)
+        print("ERROR: Hotspot targeting appears to be failing.")
+        print(f"{failed_trajectories}/{total_hotspot_trajectories} relaxed trajectories ({failure_fraction * 100:.1f}%) contact fewer than {required_fraction * 100:.1f}% of the specified hotspot residues.")
+        print(f"Stopping because this is at or above the allowed {maximum_failure_fraction * 100:.1f}% wrong-hotspot rate.")
+        return True
+
+    return False
+
 # Check if we have required number of accepted targets, rank them, and analyse sequence and structure properties
 def check_accepted_designs(design_paths, mpnn_csv, final_labels, final_csv, advanced_settings, target_settings, design_labels):
     accepted_binders = [f for f in os.listdir(design_paths["Accepted"]) if f.endswith('.pdb') and not f.startswith('.')]
@@ -279,6 +330,12 @@ def perform_input_check(args):
 
 # check specific advanced settings
 def perform_advanced_settings_check(advanced_settings, bindcraft_folder):
+    advanced_settings.setdefault("enforce_hotspot_contacts", True)
+    advanced_settings.setdefault("hotspot_contact_min_trajectories", 10)
+    advanced_settings.setdefault("hotspot_contact_required_fraction", 0.5)
+    advanced_settings.setdefault("hotspot_contact_max_failure_fraction", 0.25)
+    advanced_settings.setdefault("hotspot_contact_distance_cutoff", 4.0)
+
     # set paths to model weights and executables
     if bindcraft_folder == "colab":
         advanced_settings["af_params_dir"] = '/content/bindcraft/params/'
@@ -335,6 +392,13 @@ def create_dataframe(csv_file, columns):
         if not os.path.exists(csv_file):
             df = pd.DataFrame(columns=columns)
             _write_dataframe_atomic(csv_file, df)
+        else:
+            df = pd.read_csv(csv_file)
+            extra_columns = [column for column in df.columns if column not in columns]
+            expected_columns = columns + extra_columns
+            if list(df.columns) != expected_columns:
+                df = df.reindex(columns=expected_columns)
+                _write_dataframe_atomic(csv_file, df)
 
 # insert row of statistics into csv
 def insert_data(csv_file, data_array):

@@ -4,6 +4,7 @@
 ### Import dependencies
 import os
 import math
+import re
 import numpy as np
 from collections import defaultdict
 from scipy.spatial import cKDTree
@@ -133,6 +134,104 @@ three_to_one_map = {
     'MET': 'M', 'ASN': 'N', 'PRO': 'P', 'GLN': 'Q', 'ARG': 'R',
     'SER': 'S', 'THR': 'T', 'VAL': 'V', 'TRP': 'W', 'TYR': 'Y'
 }
+
+def parse_target_hotspot_residues(target_hotspot_residues, target_chain="A"):
+    if target_hotspot_residues in [None, False]:
+        return None
+
+    hotspot_string = str(target_hotspot_residues).strip()
+    if not hotspot_string or hotspot_string.lower() in ["none", "null", "false"]:
+        return None
+
+    hotspot_residues = set()
+    for token in hotspot_string.split(','):
+        token = token.strip()
+        if not token:
+            continue
+
+        # Whole-chain hotspot settings are valid for design loss but too broad for this hard check.
+        if re.fullmatch(r"[A-Za-z]+", token):
+            return None
+
+        match = re.fullmatch(r"([A-Za-z])?(\d+)(?:-([A-Za-z])?(\d+))?", token)
+        if match is None:
+            raise ValueError(f"Invalid target_hotspot_residues token: {token}")
+
+        start = int(match.group(2))
+        end = int(match.group(4) or start)
+        if end < start:
+            raise ValueError(f"Invalid target_hotspot_residues range: {token}")
+
+        for residue_id in range(start, end + 1):
+            hotspot_residues.add((target_chain, residue_id))
+
+    return hotspot_residues or None
+
+def _format_target_hotspot_residues(hotspot_residues):
+    return ','.join(f"{chain}{residue_id}" for chain, residue_id in sorted(hotspot_residues, key=lambda item: (item[0], item[1])))
+
+def target_hotspot_contacts(pdb_file, target_hotspot_residues, binder_chain="B", target_chain="A", atom_distance_cutoff=4.0, required_fraction=0.5):
+    parsed_hotspots = parse_target_hotspot_residues(target_hotspot_residues, target_chain)
+    if parsed_hotspots is None:
+        return {
+            'target_hotspot_residues': None,
+            'target_hotspot_contacts': None,
+            'target_hotspot_contact_count': None,
+            'target_hotspot_contact_fraction': None,
+            'target_hotspot_contact_pass': None,
+        }
+
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("complex", pdb_file)
+    model = structure[0]
+
+    if binder_chain not in model:
+        raise ValueError(f"Binder chain {binder_chain} not found in {pdb_file}")
+    if target_chain not in model:
+        raise ValueError(f"Target chain {target_chain} not found in {pdb_file}")
+
+    binder_atoms = [
+        atom for atom in Selection.unfold_entities(model[binder_chain], 'A')
+        if atom.element != 'H'
+    ]
+    target_atoms = []
+    target_atom_residues = []
+
+    for atom in Selection.unfold_entities(model[target_chain], 'A'):
+        if atom.element == 'H':
+            continue
+
+        residue = atom.get_parent()
+        residue_key = (target_chain, residue.id[1])
+        if residue_key in parsed_hotspots:
+            target_atoms.append(atom)
+            target_atom_residues.append(residue_key)
+
+    if not binder_atoms or not target_atoms:
+        contacted_hotspots = set()
+    else:
+        binder_coords = np.array([atom.coord for atom in binder_atoms])
+        target_coords = np.array([atom.coord for atom in target_atoms])
+        binder_tree = cKDTree(binder_coords)
+        target_tree = cKDTree(target_coords)
+        pairs = target_tree.query_ball_tree(binder_tree, atom_distance_cutoff)
+        contacted_hotspots = {
+            target_atom_residues[target_idx]
+            for target_idx, close_indices in enumerate(pairs)
+            if close_indices
+        }
+
+    hotspot_count = len(parsed_hotspots)
+    contact_count = len(contacted_hotspots)
+    required_contacts = math.ceil(hotspot_count * required_fraction)
+
+    return {
+        'target_hotspot_residues': _format_target_hotspot_residues(parsed_hotspots),
+        'target_hotspot_contacts': _format_target_hotspot_residues(contacted_hotspots),
+        'target_hotspot_contact_count': contact_count,
+        'target_hotspot_contact_fraction': round(contact_count / hotspot_count, 2),
+        'target_hotspot_contact_pass': contact_count >= required_contacts,
+    }
 
 # identify interacting residues at the binder interface
 def hotspot_residues(trajectory_pdb, binder_chain="B", atom_distance_cutoff=4.0):

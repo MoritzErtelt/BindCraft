@@ -77,6 +77,12 @@ while True:
         # stop design loop execution
         break
 
+    ### check if too many relaxed trajectories miss the specified hotspot residues
+    hotspot_trajectory_failures_reached = check_hotspot_trajectory_failures(trajectory_csv, advanced_settings)
+
+    if hotspot_trajectory_failures_reached:
+        raise SystemExit(1)
+
     ### check if we reached maximum allowed trajectories
     max_trajectories_reached = check_n_trajectories(design_paths, advanced_settings)
 
@@ -138,7 +144,16 @@ while True:
             trajectory_alpha, trajectory_beta, trajectory_loops, trajectory_alpha_interface, trajectory_beta_interface, trajectory_loops_interface, trajectory_i_plddt, trajectory_ss_plddt = calc_ss_percentage(trajectory_pdb, advanced_settings, binder_chain)
 
             # analyze interface scores for relaxed af2 trajectory
-            trajectory_interface_scores, trajectory_interface_AA, trajectory_interface_residues = score_interface(trajectory_relaxed, binder_chain)
+            trajectory_interface_scores, trajectory_interface_AA, trajectory_interface_residues = score_interface(
+                trajectory_relaxed,
+                binder_chain,
+                target_settings["target_hotspot_residues"],
+                advanced_settings["hotspot_contact_distance_cutoff"],
+                advanced_settings["hotspot_contact_required_fraction"],
+            )
+
+            if trajectory_interface_scores['target_hotspot_contact_pass'] is False:
+                update_failures(failure_csv, 'Trajectory_WrongHotspot')
 
             # starting binder sequence
             trajectory_sequence = trajectory.get_seq(get_best=True)[0]
@@ -150,7 +165,9 @@ while True:
             trajectory_target_rmsd = target_pdb_rmsd(trajectory_pdb, target_settings["starting_pdb"], target_settings["chains"])
 
             # save trajectory statistics into CSV
-            trajectory_data = [design_name, advanced_settings["design_algorithm"], length, seed, helicity_value, target_settings["target_hotspot_residues"], trajectory_sequence, trajectory_interface_residues, 
+            trajectory_data = [design_name, advanced_settings["design_algorithm"], length, seed, helicity_value, target_settings["target_hotspot_residues"], trajectory_sequence, trajectory_interface_residues,
+                                trajectory_interface_scores['target_hotspot_contacts'], trajectory_interface_scores['target_hotspot_contact_count'], trajectory_interface_scores['target_hotspot_contact_fraction'],
+                                trajectory_interface_scores['target_hotspot_contact_pass'],
                                 trajectory_metrics['plddt'], trajectory_metrics['ptm'], trajectory_metrics['i_ptm'], trajectory_metrics['pae'], trajectory_metrics['i_pae'],
                                 trajectory_i_plddt, trajectory_ss_plddt, num_clashes_trajectory, num_clashes_relaxed, trajectory_interface_scores['binder_score'],
                                 trajectory_interface_scores['surface_hydrophobicity'], trajectory_interface_scores['interface_sc'], trajectory_interface_scores['interface_packstat'],
@@ -160,6 +177,11 @@ while True:
                                 trajectory_alpha_interface, trajectory_beta_interface, trajectory_loops_interface, trajectory_alpha, trajectory_beta, trajectory_loops, trajectory_interface_AA, trajectory_target_rmsd, 
                                 trajectory_time_text, traj_seq_notes, settings_file, filters_file, advanced_file]
             insert_data(trajectory_csv, trajectory_data)
+
+            hotspot_trajectory_failures_reached = check_hotspot_trajectory_failures(trajectory_csv, advanced_settings)
+
+            if hotspot_trajectory_failures_reached:
+                raise SystemExit(1)
 
             if not trajectory_interface_residues:
                 print("No interface residues found for "+str(design_name)+", skipping MPNN optimization")
@@ -255,7 +277,13 @@ while True:
                                 num_clashes_mpnn_relaxed = calculate_clash_score(mpnn_design_relaxed)
 
                                 # analyze interface scores for relaxed af2 trajectory
-                                mpnn_interface_scores, mpnn_interface_AA, mpnn_interface_residues = score_interface(mpnn_design_relaxed, binder_chain)
+                                mpnn_interface_scores, mpnn_interface_AA, mpnn_interface_residues = score_interface(
+                                    mpnn_design_relaxed,
+                                    binder_chain,
+                                    target_settings["target_hotspot_residues"],
+                                    advanced_settings["hotspot_contact_distance_cutoff"],
+                                    advanced_settings["hotspot_contact_required_fraction"],
+                                )
 
                                 # secondary structure content of starting trajectory binder
                                 mpnn_alpha, mpnn_beta, mpnn_loops, mpnn_alpha_interface, mpnn_beta_interface, mpnn_loops_interface, mpnn_i_plddt, mpnn_ss_plddt = calc_ss_percentage(mpnn_design_pdb, advanced_settings, binder_chain)
@@ -296,6 +324,13 @@ while True:
                                     'Hotspot_RMSD': rmsd_site,
                                     'Target_RMSD': target_rmsd
                                 })
+
+                                if mpnn_interface_scores['target_hotspot_contact_pass'] is not None:
+                                    mpnn_complex_statistics[model_num+1].update({
+                                        'Target_HotspotContactCount': mpnn_interface_scores['target_hotspot_contact_count'],
+                                        'Target_HotspotContactFraction': mpnn_interface_scores['target_hotspot_contact_fraction'],
+                                        'Target_HotspotContactPass': mpnn_interface_scores['target_hotspot_contact_pass'],
+                                    })
 
                                 # save space by removing unrelaxed predicted mpnn complex pdb?
                                 if advanced_settings["remove_unrelaxed_complex"]:
@@ -340,7 +375,8 @@ while True:
                         statistics_labels = ['pLDDT', 'pTM', 'i_pTM', 'pAE', 'i_pAE', 'i_pLDDT', 'ss_pLDDT', 'Unrelaxed_Clashes', 'Relaxed_Clashes', 'Binder_Energy_Score', 'Surface_Hydrophobicity',
                                             'ShapeComplementarity', 'PackStat', 'dG', 'dSASA', 'dG/dSASA', 'Interface_SASA_%', 'Interface_Hydrophobicity', 'n_InterfaceResidues', 'n_InterfaceHbonds', 'InterfaceHbondsPercentage',
                                             'n_InterfaceUnsatHbonds', 'InterfaceUnsatHbondsPercentage', 'Interface_Helix%', 'Interface_BetaSheet%', 'Interface_Loop%', 'Binder_Helix%',
-                                            'Binder_BetaSheet%', 'Binder_Loop%', 'InterfaceAAs', 'Hotspot_RMSD', 'Target_RMSD']
+                                            'Binder_BetaSheet%', 'Binder_Loop%', 'InterfaceAAs', 'Target_HotspotContactCount', 'Target_HotspotContactFraction', 'Target_HotspotContactPass',
+                                            'Hotspot_RMSD', 'Target_RMSD']
 
                         # Initialize mpnn_data with the non-statistical data
                         mpnn_data = [mpnn_design_name, advanced_settings["design_algorithm"], length, seed, helicity_value, target_settings["target_hotspot_residues"], mpnn_sequence['seq'], mpnn_interface_residues, mpnn_score, mpnn_seqid]

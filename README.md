@@ -97,6 +97,13 @@ inter_contact_number            -> how many contacts each contact residue should
 weights_helicity                -> Design weight - helix propensity of the design, Default 0, negative values bias towards beta sheets
 random_helicity                 -> whether to randomly sample helicity weights for trajectories, from -1 to 1
 
+# Hotspot enforcement
+enforce_hotspot_contacts        -> stop the run if too many relaxed trajectories miss the specified hotspot residues
+hotspot_contact_min_trajectories -> how many relaxed trajectories to collect before enforcing hotspot contact failures, default 10
+hotspot_contact_required_fraction -> fraction of specified hotspot residues a trajectory must contact, default 0.5
+hotspot_contact_max_failure_fraction -> fraction of relaxed trajectories allowed to miss hotspot contacts before stopping, default 0.25
+hotspot_contact_distance_cutoff -> all-atom distance cutoff for target hotspot contacts, default 4.0
+
 # Additional losses
 use_i_ptm_loss                  -> Use i_ptm loss to optimise for interface pTM score?
 weights_iptm                    -> Design weight - i_ptm between chains
@@ -168,6 +175,9 @@ Interface_Hydrophobicity        -> Interface hydrophobicity fraction of binder i
 n_InterfaceResidues       -> number of interface residues
 n_InterfaceHbonds       -> number of hydrogen bonds at the interface
 InterfaceHbondsPercentage   -> number of hydrogen bonds compared to interface size
+Target_HotspotContactCount    -> number of specified target hotspot residues contacted by binder atoms
+Target_HotspotContactFraction -> fraction of specified target hotspot residues contacted by binder atoms
+Target_HotspotContactPass     -> whether at least the required fraction of specified hotspot residues is contacted
 n_InterfaceUnsatHbonds      -> number of unsatisfied buried hydrogen bonds at the interface
 InterfaceUnsatHbondsPercentage  -> number of unsatisfied buried hydrogen bonds compared to interface size
 Interface_Helix%        -> proportion of alfa helices at the interface
