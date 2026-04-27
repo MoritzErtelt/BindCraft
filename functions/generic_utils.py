@@ -110,6 +110,9 @@ def update_failures(failure_csv, failure_column_or_dict):
         else:
             raise
 
+    if failure_df is None:
+        raise RuntimeError("Failed to read CSV after 10 attempts")
+
     def strip_model_prefix(name):
         # Strips the model-specific prefix if it exists
         parts = name.split('_')
