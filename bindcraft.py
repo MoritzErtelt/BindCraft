@@ -150,6 +150,8 @@ while True:
                 target_settings["target_hotspot_residues"],
                 advanced_settings["hotspot_contact_distance_cutoff"],
                 advanced_settings["hotspot_contact_required_fraction"],
+                target_settings["chains"],
+                target_settings["starting_pdb"],
             )
 
             if trajectory_interface_scores['target_hotspot_contact_pass'] is False:
@@ -283,6 +285,8 @@ while True:
                                     target_settings["target_hotspot_residues"],
                                     advanced_settings["hotspot_contact_distance_cutoff"],
                                     advanced_settings["hotspot_contact_required_fraction"],
+                                    target_settings["chains"],
+                                    target_settings["starting_pdb"],
                                 )
 
                                 # secondary structure content of starting trajectory binder

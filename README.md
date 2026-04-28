@@ -98,11 +98,11 @@ weights_helicity                -> Design weight - helix propensity of the desig
 random_helicity                 -> whether to randomly sample helicity weights for trajectories, from -1 to 1
 
 # Hotspot enforcement
-enforce_hotspot_contacts        -> stop the run if too many relaxed trajectories miss the specified hotspot residues
+enforce_hotspot_contacts        -> stop the run if too many relaxed trajectories miss the specified hotspot residues; disabled automatically when hotspots are null or whole-chain tokens like `A`
 hotspot_contact_min_trajectories -> how many relaxed trajectories to collect before enforcing hotspot contact failures, default 10
 hotspot_contact_required_fraction -> fraction of specified hotspot residues a trajectory must contact, default 0.5
 hotspot_contact_max_failure_fraction -> fraction of relaxed trajectories allowed to miss hotspot contacts before stopping, default 0.25
-hotspot_contact_distance_cutoff -> all-atom distance cutoff for target hotspot contacts, default 4.0
+hotspot_contact_distance_cutoff -> all-atom distance cutoff for target hotspot contacts, default 4.0; multi-chain targets are mapped into the flattened trajectory target chain using the same chain order and residue-index offsets as ColabDesign
 
 # Additional losses
 use_i_ptm_loss                  -> Use i_ptm loss to optimise for interface pTM score?

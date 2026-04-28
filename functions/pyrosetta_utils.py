@@ -17,7 +17,7 @@ from .generic_utils import clean_pdb
 from .biopython_utils import hotspot_residues, target_hotspot_contacts
 
 # Rosetta interface scores
-def score_interface(pdb_file, binder_chain="B", target_hotspot_residues=None, hotspot_contact_cutoff=4.0, hotspot_contact_required_fraction=0.5):
+def score_interface(pdb_file, binder_chain="B", target_hotspot_residues=None, hotspot_contact_cutoff=4.0, hotspot_contact_required_fraction=0.5, target_chains="A", starting_pdb=None):
     # load pose
     pose = pr.pose_from_pdb(pdb_file)
 
@@ -45,8 +45,10 @@ def score_interface(pdb_file, binder_chain="B", target_hotspot_residues=None, ho
         target_hotspot_residues,
         binder_chain=binder_chain,
         target_chain="A",
+        target_chains=target_chains,
         atom_distance_cutoff=hotspot_contact_cutoff,
         required_fraction=hotspot_contact_required_fraction,
+        starting_pdb=starting_pdb,
     )
     
     # Iterate over the interface residues

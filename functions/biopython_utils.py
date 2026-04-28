@@ -6,6 +6,7 @@ import os
 import math
 import re
 import numpy as np
+from functools import lru_cache
 from collections import defaultdict
 from scipy.spatial import cKDTree
 from Bio import BiopythonWarning
@@ -135,15 +136,15 @@ three_to_one_map = {
     'SER': 'S', 'THR': 'T', 'VAL': 'V', 'TRP': 'W', 'TYR': 'Y'
 }
 
-def parse_target_hotspot_residues(target_hotspot_residues, target_chain="A"):
-    if target_hotspot_residues in [None, False]:
-        return None
+def _normalise_target_chain_ids(target_chains):
+    return [chain_id.strip().upper() for chain_id in str(target_chains).split(',') if chain_id.strip()]
 
+def _parse_target_hotspot_tokens(target_hotspot_residues):
     hotspot_string = str(target_hotspot_residues).strip()
     if not hotspot_string or hotspot_string.lower() in ["none", "null", "false"]:
         return None
 
-    hotspot_residues = set()
+    hotspot_tokens = []
     for token in hotspot_string.split(','):
         token = token.strip()
         if not token:
@@ -157,21 +158,109 @@ def parse_target_hotspot_residues(target_hotspot_residues, target_chain="A"):
         if match is None:
             raise ValueError(f"Invalid target_hotspot_residues token: {token}")
 
+        start_chain = match.group(1).upper() if match.group(1) else None
+        end_chain = match.group(3).upper() if match.group(3) else start_chain
+        if start_chain and end_chain and start_chain != end_chain:
+            raise ValueError(f"Invalid cross-chain hotspot range: {token}")
+
         start = int(match.group(2))
         end = int(match.group(4) or start)
         if end < start:
             raise ValueError(f"Invalid target_hotspot_residues range: {token}")
 
+        hotspot_tokens.append((token, start_chain, start, end))
+
+    return hotspot_tokens or None
+
+@lru_cache(maxsize=None)
+def _build_target_hotspot_residue_map(starting_pdb, target_chains, trajectory_target_chain="A"):
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("starting", starting_pdb)
+    model = structure[0]
+
+    chain_ids = _normalise_target_chain_ids(target_chains)
+    if not chain_ids:
+        raise ValueError("No target chains provided for hotspot mapping")
+
+    residue_lookup = {}
+    residue_number_lookup = defaultdict(list)
+    previous_last_residue_index = None
+    trajectory_target_chain = trajectory_target_chain.upper()
+
+    for chain_id in chain_ids:
+        if chain_id not in model:
+            raise ValueError(f"Target chain {chain_id} not found in {starting_pdb}")
+
+        residues = [residue for residue in model[chain_id] if is_aa(residue, standard=True) and 'N' in residue]
+        if not residues:
+            raise ValueError(f"Target chain {chain_id} has no standard amino-acid residues with backbone N atoms in {starting_pdb}")
+
+        residue_offset = 0 if previous_last_residue_index is None else previous_last_residue_index + 50
+        chain_residue_indices = []
+
+        for residue in residues:
+            residue_id = residue.id[1]
+            residue_index = residue_id + residue_offset
+            residue_key = (chain_id, residue_id)
+            residue_value = (trajectory_target_chain, residue_index)
+            residue_lookup[residue_key] = residue_value
+            residue_number_lookup[residue_id].append(residue_value)
+            chain_residue_indices.append(residue_index)
+
+        previous_last_residue_index = chain_residue_indices[-1]
+
+    return residue_lookup, {residue_id: tuple(values) for residue_id, values in residue_number_lookup.items()}
+
+def parse_target_hotspot_residues(target_hotspot_residues, target_chains="A", trajectory_target_chain="A", starting_pdb=None):
+    if target_hotspot_residues in [None, False]:
+        return None
+
+    hotspot_tokens = _parse_target_hotspot_tokens(target_hotspot_residues)
+    if hotspot_tokens is None:
+        return None
+
+    target_chain_ids = _normalise_target_chain_ids(target_chains)
+    trajectory_target_chain = trajectory_target_chain.upper()
+    if starting_pdb is None:
+        if len(target_chain_ids) != 1:
+            return None
+
+        source_target_chain = target_chain_ids[0]
+        hotspot_residues = set()
+        for token, start_chain, start, end in hotspot_tokens:
+            if start_chain and start_chain != source_target_chain:
+                raise ValueError(f"Hotspot {token} does not match target chain {source_target_chain}")
+
+            for residue_id in range(start, end + 1):
+                hotspot_residues.add((trajectory_target_chain, residue_id))
+
+        return hotspot_residues or None
+
+    residue_lookup, residue_number_lookup = _build_target_hotspot_residue_map(starting_pdb, target_chains, trajectory_target_chain)
+    hotspot_residues = set()
+    missing_hotspots = []
+    default_target_chain = target_chain_ids[0]
+
+    for token, start_chain, start, end in hotspot_tokens:
         for residue_id in range(start, end + 1):
-            hotspot_residues.add((target_chain, residue_id))
+            hotspot_chain = start_chain or default_target_chain
+            mapped_residue = residue_lookup.get((hotspot_chain, residue_id))
+            if mapped_residue is None:
+                missing_hotspots.append(f"{hotspot_chain}{residue_id}" if start_chain else str(residue_id))
+                continue
+            hotspot_residues.add(mapped_residue)
+
+    if missing_hotspots:
+        missing_hotspots = ','.join(sorted(set(missing_hotspots), key=lambda value: (re.sub(r'\d+', '', value), int(re.search(r'\d+', value).group()) if re.search(r'\d+', value) else -1)))
+        raise ValueError(f"Could not map target hotspot residues from {starting_pdb}: {missing_hotspots}")
 
     return hotspot_residues or None
 
 def _format_target_hotspot_residues(hotspot_residues):
     return ','.join(f"{chain}{residue_id}" for chain, residue_id in sorted(hotspot_residues, key=lambda item: (item[0], item[1])))
 
-def target_hotspot_contacts(pdb_file, target_hotspot_residues, binder_chain="B", target_chain="A", atom_distance_cutoff=4.0, required_fraction=0.5):
-    parsed_hotspots = parse_target_hotspot_residues(target_hotspot_residues, target_chain)
+def target_hotspot_contacts(pdb_file, target_hotspot_residues, binder_chain="B", target_chain="A", target_chains="A", atom_distance_cutoff=4.0, required_fraction=0.5, starting_pdb=None):
+    parsed_hotspots = parse_target_hotspot_residues(target_hotspot_residues, target_chains, target_chain, starting_pdb)
     if parsed_hotspots is None:
         return {
             'target_hotspot_residues': None,
