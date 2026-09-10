@@ -3,12 +3,14 @@
 ####################################
 ### Import dependencies
 import os
+import io
 import math
 import re
 import numpy as np
 from functools import lru_cache
 from collections import defaultdict
 from scipy.spatial import cKDTree
+from Bio.PDB.PDBExceptions import PDBConstructionException
 from Bio import BiopythonWarning
 from Bio.PDB import PDBParser, DSSP, Selection, Polypeptide, PDBIO, Select, Chain, Superimposer
 from Bio.SeqUtils.ProtParam import ProteinAnalysis
@@ -137,7 +139,7 @@ three_to_one_map = {
 }
 
 def _normalise_target_chain_ids(target_chains):
-    return [chain_id.strip().upper() for chain_id in str(target_chains).split(',') if chain_id.strip()]
+    return [chain_id.strip() for chain_id in str(target_chains).split(',') if chain_id.strip()]
 
 def _parse_target_hotspot_tokens(target_hotspot_residues):
     hotspot_string = str(target_hotspot_residues).strip()
@@ -158,8 +160,8 @@ def _parse_target_hotspot_tokens(target_hotspot_residues):
         if match is None:
             raise ValueError(f"Invalid target_hotspot_residues token: {token}")
 
-        start_chain = match.group(1).upper() if match.group(1) else None
-        end_chain = match.group(3).upper() if match.group(3) else start_chain
+        start_chain = match.group(1) if match.group(1) else None
+        end_chain = match.group(3) if match.group(3) else start_chain
         if start_chain and end_chain and start_chain != end_chain:
             raise ValueError(f"Invalid cross-chain hotspot range: {token}")
 
@@ -172,28 +174,55 @@ def _parse_target_hotspot_tokens(target_hotspot_residues):
 
     return hotspot_tokens or None
 
-@lru_cache(maxsize=None)
+def _strict_hotspot_structure(data):
+    """Do not let BioPython silently discard duplicate residue/atom identifiers."""
+    try:
+        return PDBParser(QUIET=True, PERMISSIVE=False).get_structure("hotspot", io.StringIO(data))
+    except PDBConstructionException as exc:
+        raise ValueError(f"Ambiguous PDB identifiers in hotspot mapping: {exc}") from exc
+
+
 def _build_target_hotspot_residue_map(starting_pdb, target_chains, trajectory_target_chain="A"):
-    parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("starting", starting_pdb)
+    # Content identity prevents stale correspondence if a source path is reused.
+    with open(starting_pdb) as handle:
+        data = handle.read()
+    lookup, numbers = _target_hotspot_map_by_content(data, target_chains, trajectory_target_chain)
+    return dict(lookup), dict(numbers)
+
+
+@lru_cache(maxsize=32)
+def _target_hotspot_map_by_content(data, target_chains, trajectory_target_chain):
+    structure = _strict_hotspot_structure(data)
     model = structure[0]
 
     chain_ids = _normalise_target_chain_ids(target_chains)
     if not chain_ids:
         raise ValueError("No target chains provided for hotspot mapping")
 
+    if len(set(chain_ids)) != len(chain_ids):
+        raise ValueError("Duplicate target chains make hotspot mapping ambiguous")
+
     residue_lookup = {}
     residue_number_lookup = defaultdict(list)
     previous_last_residue_index = None
-    trajectory_target_chain = trajectory_target_chain.upper()
+    first_residue_index = None
+    exported_identifiers = set()
 
     for chain_id in chain_ids:
         if chain_id not in model:
-            raise ValueError(f"Target chain {chain_id} not found in {starting_pdb}")
+            raise ValueError(f"Target chain {chain_id} not found in source PDB")
+
+        for residue in model[chain_id]:
+            if residue.is_disordered() == 2:
+                raise ValueError("Ambiguous alternate target residue identities")
+            if residue.id[2].strip():
+                raise ValueError("Insertion-coded target residues require unambiguous renumbering before design")
+            if 'N' in residue and (not is_aa(residue, standard=True) or residue.id[0] != ' '):
+                raise ValueError("Nonstandard target residues require explicit normalization before hotspot mapping")
 
         residues = [residue for residue in model[chain_id] if is_aa(residue, standard=True) and 'N' in residue]
         if not residues:
-            raise ValueError(f"Target chain {chain_id} has no standard amino-acid residues with backbone N atoms in {starting_pdb}")
+            raise ValueError(f"Target chain {chain_id} has no standard amino-acid residues with backbone N atoms in source PDB")
 
         residue_offset = 0 if previous_last_residue_index is None else previous_last_residue_index + 50
         chain_residue_indices = []
@@ -202,7 +231,15 @@ def _build_target_hotspot_residue_map(starting_pdb, target_chains, trajectory_ta
             residue_id = residue.id[1]
             residue_index = residue_id + residue_offset
             residue_key = (chain_id, residue_id)
-            residue_value = (trajectory_target_chain, residue_index)
+            if first_residue_index is None:
+                first_residue_index = residue_index
+            # prep_pdb retains numbering gaps and adds the previous index + 50
+            # for each source chain. Binder save_pdb merges the target into A,
+            # then renum_pdb_str starts that merged chain at 1.
+            residue_value = (trajectory_target_chain, residue_index - first_residue_index + 1)
+            if residue_key in residue_lookup or residue_value in exported_identifiers:
+                raise ValueError("Ambiguous source-to-output hotspot residue identifiers")
+            exported_identifiers.add(residue_value)
             residue_lookup[residue_key] = residue_value
             residue_number_lookup[residue_id].append(residue_value)
             chain_residue_indices.append(residue_index)
@@ -220,10 +257,9 @@ def parse_target_hotspot_residues(target_hotspot_residues, target_chains="A", tr
         return None
 
     target_chain_ids = _normalise_target_chain_ids(target_chains)
-    trajectory_target_chain = trajectory_target_chain.upper()
     if starting_pdb is None:
         if len(target_chain_ids) != 1:
-            return None
+            raise ValueError("Explicit multichain hotspots require the source PDB for mapping")
 
         source_target_chain = target_chain_ids[0]
         hotspot_residues = set()
@@ -270,14 +306,24 @@ def target_hotspot_contacts(pdb_file, target_hotspot_residues, binder_chain="B",
             'target_hotspot_contact_pass': None,
         }
 
-    parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("complex", pdb_file)
+    with open(pdb_file) as handle:
+        structure = _strict_hotspot_structure(handle.read())
     model = structure[0]
 
     if binder_chain not in model:
         raise ValueError(f"Binder chain {binder_chain} not found in {pdb_file}")
     if target_chain not in model:
         raise ValueError(f"Target chain {target_chain} not found in {pdb_file}")
+
+    mapped = set()
+    for residue in model[target_chain]:
+        key = (target_chain, residue.id[1])
+        if key in parsed_hotspots:
+            if residue.is_disordered() == 2 or residue.id[2].strip() or residue.id[0] != ' ' or key in mapped:
+                raise ValueError(f"Ambiguous assessed hotspot identifier: {key}")
+            mapped.add(key)
+    if parsed_hotspots - mapped:
+        raise ValueError(f"Mapped explicit hotspots missing from assessed structure: {sorted(parsed_hotspots - mapped)}")
 
     binder_atoms = [
         atom for atom in Selection.unfold_entities(model[binder_chain], 'A')
